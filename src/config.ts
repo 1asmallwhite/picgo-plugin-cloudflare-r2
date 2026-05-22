@@ -12,15 +12,15 @@ export const UploaderConfig = [
   {
     alias: 'accessKey',
     name: ConfigEnum.ACCESS_KEY,
-    type: 'input',
+    type: 'password',
     default: '',
-    message: '访问存储痛的Key',
+    message: '访问存储桶的Key',
     required: true
   },
   {
     alias: 'access密钥',
     name: ConfigEnum.SECRET_ACCESS,
-    type: 'input',
+    type: 'password',
     default: '',
     message: '访问存储桶的密钥',
     required: true

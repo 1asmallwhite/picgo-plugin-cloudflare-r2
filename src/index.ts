@@ -1,18 +1,12 @@
 import { PicGo } from 'picgo'
 import type { IPicGo } from 'picgo'
-import { S3Client, ListBucketsCommand, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
 import { AppConfig, ConfigEnum } from './index.enum'
 import { UploaderConfig } from './config'
 import { posix } from 'path'
 import { verifyConfig } from './utils'
+import type { FileType } from './types'
 
-/**
- * 消息通知函数
- * @param ctx
- * @param title
- * @param body
- * @param text
- */
 const notify = (ctx: IPicGo, {
   title, body, text
 }: {
@@ -27,19 +21,24 @@ const notify = (ctx: IPicGo, {
   })
 }
 
-export = (ctx: PicGo) => {
-  // 注册
+const createS3Client = (config: Record<string, string>): S3Client => {
+  return new S3Client({
+    region: 'auto',
+    endpoint: config[ConfigEnum.ENDPOINT],
+    credentials: {
+      accessKeyId: config[ConfigEnum.ACCESS_KEY],
+      secretAccessKey: config[ConfigEnum.SECRET_ACCESS]
+    }
+  })
+}
+
+export = (_ctx: PicGo) => {
   const register = (ctx: IPicGo) => {
-    /**
-     * Uploader组件
-     */
     ctx.helper.uploader.register(AppConfig.NAME, {
       async handle (ctx) {
         const { default: mime } = await import('mime')
 
-        // 配置校验
         const config = ctx.getConfig<Record<string, string>>('picBed.cloudflare-r2')
-        // 重命名存储路径
         const storageKey = config[ConfigEnum.SUB_FOLDER] ?? '/'
         const errMeg = verifyConfig(config)
         if (errMeg) {
@@ -49,46 +48,32 @@ export = (ctx: PicGo) => {
           })
           return ctx.output
         }
-        const S3 = new S3Client({
-          region: 'auto',
-          endpoint: config[ConfigEnum.ENDPOINT],
-          credentials: {
-            accessKeyId: config[ConfigEnum.ACCESS_KEY],
-            secretAccessKey: config[ConfigEnum.SECRET_ACCESS]
-          }
-        })
+        const S3 = createS3Client(config)
 
         for (const imageItem of ctx.output) {
-          const { fileName: filename, buffer, base64Image, extname, imgUrl } = imageItem
+          const { fileName: filename, buffer, extname } = imageItem
+          if (!filename) { continue }
           if ((/(\\|\/|:)/ig).test(filename)) {
             notify(ctx, {
               title: '上传文件名错误',
-              body: '请勿使用.:/\\此类具有歧义的符号'
+              body: '请勿使用:/\\此类具有歧义的符号'
             })
             continue
           }
-          // debug
-          /* ctx.log.info('config', JSON.stringify({
-            Bucket: config[ConfigEnum.BUCKET_NAME],
-            Key: `${storageKey}${filename}`,
-            ContentType: mime.getType(extname)
-          })) */
 
           try {
-            // 格式化上传路径
-            let uri = posix.join(storageKey, filename) // 格式: /md/1.png
-            ctx.log.info('uri', uri as any)
+            let uri = posix.join(storageKey, filename)
+            ctx.log.info('uri', uri)
             if (uri.startsWith('/')) {
               uri = uri.slice(1)
             }
-            // 上传文件
             const objRes = await S3.send(new PutObjectCommand({
               Bucket: config[ConfigEnum.BUCKET_NAME],
               Body: buffer,
               Key: uri,
-              ContentType: mime.getType(extname)
+              ContentType: mime.getType(extname ?? '') ?? 'application/octet-stream'
             }))
-            ctx.log.info('objRes', objRes as any)
+            ctx.log.info('objRes', String(objRes.$metadata.httpStatusCode))
             if (objRes.$metadata.httpStatusCode !== 200) {
               throw new Error('上传到存储桶失败，请检查原因')
             }
@@ -96,68 +81,57 @@ export = (ctx: PicGo) => {
             imageItem.imgUrl = url.href
             imageItem.url = url.href
           } catch (error) {
-            ctx.log.error('uploader error', error)
-            if (error.name.includes('NoSuchBucket')) {
+            const message = error instanceof Error ? error.message : String(error)
+            ctx.log.error('uploader error', message)
+            if (error instanceof Error && error.name.includes('NoSuchBucket')) {
               notify(ctx, { title: '上传错误', body: '对应的存储桶不存在' })
-            } else if (error.name.includes('InvalidBucketName')) {
+            } else if (error instanceof Error && error.name.includes('InvalidBucketName')) {
               notify(ctx, { title: '上传错误', body: '存储桶名称至少三个字符' })
             } else {
-              notify(ctx, { title: '上传错误', body: error.message })
+              notify(ctx, { title: '上传错误', body: message })
             }
           }
         }
         return ctx.output
       },
-      // uploader配置
-      config: (ctx) => UploaderConfig
+      config: (_ctx) => UploaderConfig
     })
 
-    /**
-     * 移除图片事件
-     */
-    ctx.on('remove', (files: FileType[], guiApi) => {
+    ctx.on('remove', async (files: FileType[], _guiApi: any) => {
       const config = ctx.getConfig<Record<string, string>>('picBed.cloudflare-r2')
-      const S3 = new S3Client({
-        region: 'auto',
-        endpoint: config[ConfigEnum.ENDPOINT],
-        credentials: {
-          accessKeyId: config[ConfigEnum.ACCESS_KEY],
-          secretAccessKey: config[ConfigEnum.SECRET_ACCESS]
-        }
-      })
+      const S3 = createS3Client(config)
 
       for (const file of files) {
         const { type, imgUrl, fileName } = file
-        ctx.log.info('file', file as any)
-        if (type !== AppConfig.NAME) continue // 其他uploader
+        ctx.log.info('file', JSON.stringify({ type, fileName }))
+        if (type !== AppConfig.NAME) { continue }
 
-        // cloudflare-r2 uploader
         const url = new URL(imgUrl)
         let pathname = url.pathname
         if (pathname.startsWith('/')) {
           pathname = pathname.slice(1)
         }
 
-        // 删除文件
         ctx.log.info('remove file', pathname)
-        S3.send(new DeleteObjectCommand({
-          Bucket: config[ConfigEnum.BUCKET_NAME],
-          Key: pathname
-        })).then((delRes) => {
-          ctx.log.info('remove success', delRes as any)
+        try {
+          const delRes = await S3.send(new DeleteObjectCommand({
+            Bucket: config[ConfigEnum.BUCKET_NAME],
+            Key: pathname
+          }))
+          ctx.log.info('remove success', String(delRes.$metadata.httpStatusCode))
           notify(ctx, {
             title: '删除成功',
             body: `cloudflare-r2中成功删除${fileName}文件`
           })
-        }).catch((err: Error) => {
-          ctx.log.info('remove error', err.message)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          ctx.log.info('remove error', message)
           notify(ctx, {
-            title: '删除失败❌',
-            body: err.message
+            title: '删除失败',
+            body: message
           })
-        })
+        }
       }
-      // ctx.log.info('remove event:', JSON.stringify(files))
     })
   }
   return {

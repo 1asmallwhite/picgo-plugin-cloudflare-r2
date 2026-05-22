@@ -22,4 +22,6 @@ export const verifyConfig = (config: Record<string, string>): undefined | string
       return `配置项不完整: ${item}缺失`
     }
   }
+
+  return undefined
 }
