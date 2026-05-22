@@ -25,6 +25,7 @@ pnpm-debug.log*
 
 # Package manager
 package-lock.json
+pnpm-lock.yaml
 *.tgz
 
 # Cache
